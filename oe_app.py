@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
-import hdbscan
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -13,15 +12,12 @@ from sklearn.cluster import KMeans
 # STREAMLIT CONFIG
 # -----------------------------
 st.set_page_config(layout="wide")
-st.title("AI Open-End Coding Tool (Stable Production Version)")
+st.title("AI Open-End Coding Tool (Stable Cloud Version)")
 
-# -----------------------------
-# STOPWORDS
-# -----------------------------
 STOPWORDS = text.ENGLISH_STOP_WORDS
 
 # -----------------------------
-# TEXT CLEANING
+# CLEAN TEXT
 # -----------------------------
 def clean_text(text_input):
     text_input = str(text_input).lower()
@@ -46,10 +42,10 @@ def simple_sentiment(text_input):
         return "Neutral"
 
 # -----------------------------
-# CORE PROCESSING
+# PROCESSING FUNCTION
 # -----------------------------
 @st.cache_data(show_spinner=False)
-def process_data(df, text_column):
+def process_data(df, text_column, n_clusters):
 
     df = df[df[text_column].notna()]
     df = df[df[text_column].str.strip() != ""]
@@ -65,56 +61,26 @@ def process_data(df, text_column):
 
     X = vectorizer.fit_transform(df["clean_text"])
 
-    # -----------------------------
-    # PRIMARY CLUSTERING (HDBSCAN)
-    # -----------------------------
-    clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=5,
-        min_samples=2,
-        metric="cosine"
-    )
-
-    clusters = clusterer.fit_predict(X.toarray())
-
-    # -----------------------------
-    # FALLBACK IF ALL NOISE
-    # -----------------------------
-    if len(set(clusters)) <= 1:
-        n_clusters = min(8, max(2, len(df)//20))
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-        clusters = kmeans.fit_predict(X)
+    # KMEANS CLUSTERING (STABLE)
+    kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+    clusters = kmeans.fit_predict(X)
 
     df["Cluster_ID"] = clusters
 
-    # -----------------------------
     # CONFIDENCE SCORING
-    # -----------------------------
-    confidence_scores = np.zeros(len(df))
-    unique_clusters = np.unique(clusters)
+    centroids = kmeans.cluster_centers_
 
-    for cluster in unique_clusters:
-        mask = df["Cluster_ID"] == cluster
-        cluster_points = X[mask]
+    similarity = cosine_similarity(X, centroids)
+    max_similarity = similarity.max(axis=1)
 
-        centroid = cluster_points.mean(axis=0)
-        similarity = cosine_similarity(
-            cluster_points,
-            centroid
-        ).flatten()
+    df["Confidence_%"] = np.round(max_similarity * 100, 2)
 
-        confidence_scores[mask] = similarity * 100
-
-    df["Confidence_%"] = np.round(confidence_scores, 2)
-
-    # -----------------------------
-    # SENTIMENT
-    # -----------------------------
     df["Sentiment"] = df[text_column].apply(simple_sentiment)
 
     return df, vectorizer
 
 # -----------------------------
-# KEYWORD EXTRACTION
+# KEYWORDS
 # -----------------------------
 def extract_keywords(df, vectorizer):
 
@@ -135,7 +101,7 @@ def extract_keywords(df, vectorizer):
     return cluster_keywords
 
 # -----------------------------
-# SESSION STATE INIT
+# SESSION STATE
 # -----------------------------
 if "coding_done" not in st.session_state:
     st.session_state.coding_done = False
@@ -152,12 +118,15 @@ if uploaded_file:
 
     text_column = st.selectbox("Select Open-End Column", df.columns)
 
-    # RUN CODING
+    # Choose number of clusters
+    suggested_clusters = min(8, max(3, len(df)//100))
+    n_clusters = st.slider("Select Number of Themes", 2, 15, suggested_clusters)
+
     if st.button("Run AI Coding"):
 
         with st.spinner("Processing..."):
 
-            processed_df, vectorizer = process_data(df, text_column)
+            processed_df, vectorizer = process_data(df, text_column, n_clusters)
             keywords = extract_keywords(processed_df, vectorizer)
 
             st.session_state.processed_df = processed_df
@@ -165,7 +134,6 @@ if uploaded_file:
             st.session_state.keywords = keywords
             st.session_state.coding_done = True
 
-    # RENAME + FREEZE
     if st.session_state.coding_done:
 
         processed_df = st.session_state.processed_df
@@ -173,19 +141,19 @@ if uploaded_file:
 
         st.success("Clustering Completed")
 
-        st.subheader("Rename Clusters")
+        st.subheader("Rename Themes")
 
         cluster_names = {}
 
         for cluster, words in keywords.items():
             suggested_label = " / ".join(words[:3])
             cluster_names[cluster] = st.text_input(
-                f"Cluster {cluster}",
+                f"Theme {cluster}",
                 value=suggested_label,
                 key=f"cluster_{cluster}"
             )
 
-        if st.button("Freeze Cluster Names"):
+        if st.button("Freeze Theme Names"):
 
             processed_df["Cluster_Name"] = processed_df["Cluster_ID"].map(cluster_names)
 
