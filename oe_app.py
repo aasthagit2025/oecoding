@@ -2,26 +2,23 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import re
-import nltk
 import hdbscan
 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics.pairwise import cosine_similarity
-from nltk.corpus import stopwords
-from nltk.sentiment import SentimentIntensityAnalyzer
+from sklearn.feature_extraction import text
 
 # -----------------------------
 # STREAMLIT CONFIG
 # -----------------------------
 st.set_page_config(layout="wide")
-st.title("AI Open-End Coding Tool (Production Version)")
+st.title("AI Open-End Coding Tool (Cloud Safe Version)")
 
 # -----------------------------
-# LOAD NLTK (Assumes pre-installed in environment)
+# STOPWORDS (Sklearn built-in)
 # -----------------------------
-STOPWORDS = set(stopwords.words("english"))
-sia = SentimentIntensityAnalyzer()
+STOPWORDS = text.ENGLISH_STOP_WORDS
 
 # -----------------------------
 # TEXT CLEANING
@@ -34,38 +31,46 @@ def clean_text(text):
     return " ".join(words)
 
 # -----------------------------
-# CORE PROCESSING FUNCTION (CACHED)
+# SIMPLE SENTIMENT (Keyword Based)
+# -----------------------------
+positive_words = {"good", "great", "excellent", "fast", "easy", "love", "best", "happy"}
+negative_words = {"bad", "poor", "slow", "late", "worst", "hate", "problem", "issue"}
+
+def simple_sentiment(text):
+    words = set(text.lower().split())
+    if len(words & positive_words) > len(words & negative_words):
+        return "Positive"
+    elif len(words & negative_words) > len(words & positive_words):
+        return "Negative"
+    else:
+        return "Neutral"
+
+# -----------------------------
+# CORE PROCESSING
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def process_data(df, text_column):
 
-    # Remove blanks
     df = df[df[text_column].notna()]
     df = df[df[text_column].str.strip() != ""]
     df = df.reset_index(drop=True)
 
-    # Clean text
     df["clean_text"] = df[text_column].apply(clean_text)
 
-    # TF-IDF
     vectorizer = TfidfVectorizer(max_features=4000, ngram_range=(1,2))
     X = vectorizer.fit_transform(df["clean_text"])
 
-    # Dimensionality reduction
     svd = TruncatedSVD(n_components=100, random_state=42)
     X_reduced = svd.fit_transform(X)
 
-    # Clustering
     clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=max(15, int(len(df)*0.01)),  # auto scale
-        metric="euclidean"
+        min_cluster_size=max(15, int(len(df)*0.01))
     )
     clusters = clusterer.fit_predict(X_reduced)
+
     df["Cluster_ID"] = clusters
 
-    # -----------------------------
-    # VECTORISED CONFIDENCE SCORING
-    # -----------------------------
+    # Vectorized confidence
     unique_clusters = np.unique(clusters)
     cluster_centers = {}
 
@@ -77,29 +82,21 @@ def process_data(df, text_column):
     confidence_scores = np.zeros(len(df))
 
     for cluster, center in cluster_centers.items():
-        cluster_mask = df["Cluster_ID"] == cluster
+        mask = df["Cluster_ID"] == cluster
         similarity = cosine_similarity(
-            X_reduced[cluster_mask], 
+            X_reduced[mask], 
             center.reshape(1, -1)
         ).flatten()
-        confidence_scores[cluster_mask] = similarity * 100
+        confidence_scores[mask] = similarity * 100
 
     df["Confidence_%"] = np.round(confidence_scores, 2)
 
-    # -----------------------------
-    # SENTIMENT (Vectorized Apply)
-    # -----------------------------
-    df["Sentiment"] = df[text_column].apply(
-        lambda x: "Positive" if sia.polarity_scores(str(x))["compound"] >= 0.05
-        else "Negative" if sia.polarity_scores(str(x))["compound"] <= -0.05
-        else "Neutral"
-    )
+    df["Sentiment"] = df[text_column].apply(simple_sentiment)
 
     return df, vectorizer
 
-
 # -----------------------------
-# CLUSTER KEYWORDS
+# KEYWORD EXTRACTION
 # -----------------------------
 def extract_keywords(df, vectorizer):
 
@@ -120,7 +117,6 @@ def extract_keywords(df, vectorizer):
 
     return cluster_keywords
 
-
 # -----------------------------
 # UI
 # -----------------------------
@@ -134,16 +130,13 @@ if uploaded_file:
 
     if st.button("Run AI Coding"):
 
-        with st.spinner("Processing 10K+ verbatims... please wait."):
+        with st.spinner("Processing..."):
 
             processed_df, vectorizer = process_data(df, text_column)
             keywords = extract_keywords(processed_df, vectorizer)
 
         st.success("Clustering Completed")
 
-        # -----------------------------
-        # RENAME CLUSTERS
-        # -----------------------------
         st.subheader("Rename Clusters")
 
         cluster_names = {}
@@ -160,9 +153,6 @@ if uploaded_file:
             processed_df["Cluster_Name"] = processed_df["Cluster_ID"].map(cluster_names)
             processed_df["Cluster_Name"] = processed_df["Cluster_Name"].fillna("Noise/Unclassified")
 
-            # -----------------------------
-            # FREQUENCY SUMMARY
-            # -----------------------------
             freq_summary = (
                 processed_df.groupby("Cluster_Name")
                 .size()
@@ -177,21 +167,14 @@ if uploaded_file:
             st.subheader("Theme Frequency Summary")
             st.dataframe(freq_summary)
 
-            # -----------------------------
-            # EXPORT
-            # -----------------------------
             st.download_button(
-                label="Download Coded Dataset",
-                data=processed_df.to_csv(index=False),
-                file_name="coded_output.csv",
-                mime="text/csv"
+                "Download Coded Dataset",
+                processed_df.to_csv(index=False),
+                "coded_output.csv"
             )
 
             st.download_button(
-                label="Download Frequency Summary",
-                data=freq_summary.to_csv(index=False),
-                file_name="theme_summary.csv",
-                mime="text/csv"
+                "Download Frequency Summary",
+                freq_summary.to_csv(index=False),
+                "theme_summary.csv"
             )
-
-            st.success("Coding Completed & Ready for Download.")
