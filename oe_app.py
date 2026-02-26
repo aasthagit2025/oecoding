@@ -3,46 +3,33 @@ import pandas as pd
 import numpy as np
 import re
 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.feature_extraction import text
 from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity
+from sentence_transformers import SentenceTransformer
 
 # -----------------------------
-# STREAMLIT CONFIG
+# CONFIG
 # -----------------------------
 st.set_page_config(layout="wide")
-st.title("AI Open-End Coding Tool (Stable Cloud Version)")
+st.title("AI Open-End Coding Tool (Semantic Version)")
 
-STOPWORDS = text.ENGLISH_STOP_WORDS
+# Load model once
+@st.cache_resource
+def load_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+model = load_model()
 
 # -----------------------------
 # CLEAN TEXT
 # -----------------------------
 def clean_text(text_input):
-    text_input = str(text_input).lower()
-    text_input = re.sub(r"[^a-zA-Z\s]", "", text_input)
-    words = text_input.split()
-    words = [w for w in words if w not in STOPWORDS and len(w) > 2]
-    return " ".join(words)
+    text_input = str(text_input).strip()
+    text_input = re.sub(r"\s+", " ", text_input)
+    return text_input
 
 # -----------------------------
-# SIMPLE SENTIMENT
-# -----------------------------
-positive_words = {"good", "great", "excellent", "fast", "easy", "love", "best", "happy"}
-negative_words = {"bad", "poor", "slow", "late", "worst", "hate", "problem", "issue"}
-
-def simple_sentiment(text_input):
-    words = set(str(text_input).lower().split())
-    if len(words & positive_words) > len(words & negative_words):
-        return "Positive"
-    elif len(words & negative_words) > len(words & positive_words):
-        return "Negative"
-    else:
-        return "Neutral"
-
-# -----------------------------
-# PROCESSING FUNCTION
+# PROCESS DATA
 # -----------------------------
 @st.cache_data(show_spinner=False)
 def process_data(df, text_column, n_clusters):
@@ -53,50 +40,40 @@ def process_data(df, text_column, n_clusters):
 
     df["clean_text"] = df[text_column].apply(clean_text)
 
-    vectorizer = TfidfVectorizer(
-        max_features=5000,
-        ngram_range=(1, 2),
-        min_df=2
+    # Generate semantic embeddings
+    embeddings = model.encode(
+        df["clean_text"].tolist(),
+        show_progress_bar=False
     )
 
-    X = vectorizer.fit_transform(df["clean_text"])
-
-    # KMEANS CLUSTERING (STABLE)
+    # KMeans clustering
     kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-    clusters = kmeans.fit_predict(X)
+    clusters = kmeans.fit_predict(embeddings)
 
     df["Cluster_ID"] = clusters
 
-    # CONFIDENCE SCORING
-    centroids = kmeans.cluster_centers_
+    # Confidence score
+    similarity = cosine_similarity(embeddings, kmeans.cluster_centers_)
+    df["Confidence_%"] = np.round(similarity.max(axis=1) * 100, 2)
 
-    similarity = cosine_similarity(X, centroids)
-    max_similarity = similarity.max(axis=1)
-
-    df["Confidence_%"] = np.round(max_similarity * 100, 2)
-
-    df["Sentiment"] = df[text_column].apply(simple_sentiment)
-
-    return df, vectorizer
+    return df, embeddings
 
 # -----------------------------
-# KEYWORDS
+# EXTRACT KEYWORDS
 # -----------------------------
-def extract_keywords(df, vectorizer):
+def extract_keywords(df, text_column):
 
-    feature_names = vectorizer.get_feature_names_out()
     cluster_keywords = {}
 
     for cluster in df["Cluster_ID"].unique():
 
-        cluster_text = df[df["Cluster_ID"] == cluster]["clean_text"]
-        cluster_vector = vectorizer.transform(cluster_text)
+        cluster_text = df[df["Cluster_ID"] == cluster][text_column]
 
-        mean_tfidf = cluster_vector.mean(axis=0)
-        sorted_indices = mean_tfidf.A1.argsort()[::-1][:10]
+        combined = " ".join(cluster_text.tolist())
+        words = combined.lower().split()
 
-        top_words = [feature_names[i] for i in sorted_indices]
-        cluster_keywords[cluster] = top_words
+        freq = pd.Series(words).value_counts().head(5)
+        cluster_keywords[cluster] = list(freq.index)
 
     return cluster_keywords
 
@@ -114,32 +91,33 @@ uploaded_file = st.file_uploader("Upload CSV File", type=["csv"])
 if uploaded_file:
 
     df = pd.read_csv(uploaded_file)
-    st.write("Available Columns:", df.columns)
+    st.write("Columns:", df.columns)
 
     text_column = st.selectbox("Select Open-End Column", df.columns)
 
-    # Choose number of clusters
     suggested_clusters = min(8, max(3, len(df)//100))
-    n_clusters = st.slider("Select Number of Themes", 2, 15, suggested_clusters)
+    n_clusters = st.slider("Number of Themes", 2, 15, suggested_clusters)
 
     if st.button("Run AI Coding"):
 
-        with st.spinner("Processing..."):
+        with st.spinner("Generating semantic clusters..."):
 
-            processed_df, vectorizer = process_data(df, text_column, n_clusters)
-            keywords = extract_keywords(processed_df, vectorizer)
+            processed_df, embeddings = process_data(df, text_column, n_clusters)
+            keywords = extract_keywords(processed_df, text_column)
 
             st.session_state.processed_df = processed_df
-            st.session_state.vectorizer = vectorizer
             st.session_state.keywords = keywords
             st.session_state.coding_done = True
 
+    # -----------------------------
+    # RENAME THEMES
+    # -----------------------------
     if st.session_state.coding_done:
 
         processed_df = st.session_state.processed_df
         keywords = st.session_state.keywords
 
-        st.success("Clustering Completed")
+        st.success("Semantic Clustering Completed")
 
         st.subheader("Rename Themes")
 
@@ -153,7 +131,7 @@ if uploaded_file:
                 key=f"cluster_{cluster}"
             )
 
-        if st.button("Freeze Theme Names"):
+        if st.button("Freeze Themes"):
 
             processed_df["Cluster_Name"] = processed_df["Cluster_ID"].map(cluster_names)
 
@@ -168,19 +146,29 @@ if uploaded_file:
                 (freq_summary["Count"] / len(processed_df)) * 100, 2
             )
 
-            st.subheader("Theme Frequency Summary")
-            st.dataframe(freq_summary)
+            # Store final outputs
+            st.session_state.final_df = processed_df
+            st.session_state.freq_summary = freq_summary
+            st.session_state.frozen = True
 
-            st.download_button(
-                "Download Coded Dataset",
-                processed_df.to_csv(index=False),
-                "coded_output.csv"
-            )
+    # -----------------------------
+    # DOWNLOAD SECTION (SEPARATE)
+    # -----------------------------
+    if st.session_state.get("frozen", False):
 
-            st.download_button(
-                "Download Frequency Summary",
-                freq_summary.to_csv(index=False),
-                "theme_summary.csv"
-            )
+        st.subheader("Theme Frequency Summary")
+        st.dataframe(st.session_state.freq_summary)
 
-            st.success("Coding Completed & Ready for Download.")
+        st.download_button(
+            "Download Coded Dataset",
+            st.session_state.final_df.to_csv(index=False),
+            "coded_output.csv"
+        )
+
+        st.download_button(
+            "Download Frequency Summary",
+            st.session_state.freq_summary.to_csv(index=False),
+            "theme_summary.csv"
+        )
+
+        st.success("Downloads Ready.")
