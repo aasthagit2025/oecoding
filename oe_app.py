@@ -5,15 +5,15 @@ import re
 import hdbscan
 
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.decomposition import TruncatedSVD
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.feature_extraction import text
+from sklearn.cluster import KMeans
 
 # -----------------------------
 # STREAMLIT CONFIG
 # -----------------------------
 st.set_page_config(layout="wide")
-st.title("AI Open-End Coding Tool (Production Version)")
+st.title("AI Open-End Coding Tool (Stable Production Version)")
 
 # -----------------------------
 # STOPWORDS
@@ -57,43 +57,58 @@ def process_data(df, text_column):
 
     df["clean_text"] = df[text_column].apply(clean_text)
 
-    vectorizer = TfidfVectorizer(max_features=4000, ngram_range=(1, 2))
+    vectorizer = TfidfVectorizer(
+        max_features=5000,
+        ngram_range=(1, 2),
+        min_df=2
+    )
+
     X = vectorizer.fit_transform(df["clean_text"])
 
-    svd = TruncatedSVD(n_components=100, random_state=42)
-    X_reduced = svd.fit_transform(X)
-
+    # -----------------------------
+    # PRIMARY CLUSTERING (HDBSCAN)
+    # -----------------------------
     clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=max(15, int(len(df) * 0.01))
+        min_cluster_size=5,
+        min_samples=2,
+        metric="cosine"
     )
-    clusters = clusterer.fit_predict(X_reduced)
+
+    clusters = clusterer.fit_predict(X.toarray())
+
+    # -----------------------------
+    # FALLBACK IF ALL NOISE
+    # -----------------------------
+    if len(set(clusters)) <= 1:
+        n_clusters = min(8, max(2, len(df)//20))
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+        clusters = kmeans.fit_predict(X)
 
     df["Cluster_ID"] = clusters
 
     # -----------------------------
-    # CONFIDENCE SCORING (Vectorized)
+    # CONFIDENCE SCORING
     # -----------------------------
+    confidence_scores = np.zeros(len(df))
     unique_clusters = np.unique(clusters)
-    cluster_centers = {}
 
     for cluster in unique_clusters:
-        if cluster == -1:
-            continue
-        cluster_centers[cluster] = X_reduced[clusters == cluster].mean(axis=0)
-
-    confidence_scores = np.zeros(len(df))
-
-    for cluster, center in cluster_centers.items():
         mask = df["Cluster_ID"] == cluster
+        cluster_points = X[mask]
+
+        centroid = cluster_points.mean(axis=0)
         similarity = cosine_similarity(
-            X_reduced[mask],
-            center.reshape(1, -1)
+            cluster_points,
+            centroid
         ).flatten()
+
         confidence_scores[mask] = similarity * 100
 
     df["Confidence_%"] = np.round(confidence_scores, 2)
 
-    # Sentiment
+    # -----------------------------
+    # SENTIMENT
+    # -----------------------------
     df["Sentiment"] = df[text_column].apply(simple_sentiment)
 
     return df, vectorizer
@@ -107,15 +122,14 @@ def extract_keywords(df, vectorizer):
     cluster_keywords = {}
 
     for cluster in df["Cluster_ID"].unique():
-        if cluster == -1:
-            continue
 
         cluster_text = df[df["Cluster_ID"] == cluster]["clean_text"]
         cluster_vector = vectorizer.transform(cluster_text)
+
         mean_tfidf = cluster_vector.mean(axis=0)
         sorted_indices = mean_tfidf.A1.argsort()[::-1][:10]
-        top_words = [feature_names[i] for i in sorted_indices]
 
+        top_words = [feature_names[i] for i in sorted_indices]
         cluster_keywords[cluster] = top_words
 
     return cluster_keywords
@@ -138,12 +152,10 @@ if uploaded_file:
 
     text_column = st.selectbox("Select Open-End Column", df.columns)
 
-    # -----------------------------
-    # RUN AI CODING
-    # -----------------------------
+    # RUN CODING
     if st.button("Run AI Coding"):
 
-        with st.spinner("Processing... Please wait."):
+        with st.spinner("Processing..."):
 
             processed_df, vectorizer = process_data(df, text_column)
             keywords = extract_keywords(processed_df, vectorizer)
@@ -153,9 +165,7 @@ if uploaded_file:
             st.session_state.keywords = keywords
             st.session_state.coding_done = True
 
-    # -----------------------------
     # RENAME + FREEZE
-    # -----------------------------
     if st.session_state.coding_done:
 
         processed_df = st.session_state.processed_df
@@ -178,7 +188,6 @@ if uploaded_file:
         if st.button("Freeze Cluster Names"):
 
             processed_df["Cluster_Name"] = processed_df["Cluster_ID"].map(cluster_names)
-            processed_df["Cluster_Name"] = processed_df["Cluster_Name"].fillna("Noise/Unclassified")
 
             freq_summary = (
                 processed_df.groupby("Cluster_Name")
